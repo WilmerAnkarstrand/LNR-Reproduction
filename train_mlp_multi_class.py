@@ -1,6 +1,6 @@
 """
 MLP Training Script for KEEL Ecoli1 Dataset
-Binary classification: positive vs negative
+Multi-class classification
 """
 
 import numpy as np
@@ -52,27 +52,65 @@ def parse_kaggle_dat(filepath):
 
 def print_imbalance_info(y):
     """Print imbalance information for the dataset."""
-    n_positive = sum(y)
-    n_negative = len(y) - n_positive
+    unique, counts = np.unique(y, return_counts=True)
     total = len(y)
-    ratio = n_negative / n_positive if n_positive > 0 else float('inf')
     
     print("\n" + "="*50)
     print("Dataset Imbalance Information")
     print("="*50)
     print(f"Total samples:    {total}")
-    print(f"Positive (minority): {n_positive} ({100*n_positive/total:.1f}%)")
-    print(f"Negative (majority): {n_negative} ({100*n_negative/total:.1f}%)")
-    print(f"Imbalance ratio:  1:{ratio:.2f}")
+    for label, count in zip(unique, counts):
+        print(f"Class {int(label)}: {count} ({100*count/total:.1f}%)")
     print("="*50 + "\n")
     
-    return ratio
+    return counts
+
+
+def make_imbalanced_dataset(X, y, high_classes, medium_classes, low_classes, medium_ratio, low_ratio, random_seed=42):
+    """
+    Creates an imbalanced version of the dataset.
+    
+    Args:
+        X: Features
+        y: Labels
+        high_classes: List of class labels for the 'high' frequency group (kept at 100%)
+        medium_classes: List of class labels for the 'medium' frequency group
+        low_classes: List of class labels for the 'low' frequency group
+        medium_ratio: Ratio of samples to keep for medium classes (0 < ratio <= 1)
+        low_ratio: Ratio of samples to keep for low classes (0 < ratio <= 1)
+        random_seed: Random seed for reproducibility
+    """
+    np.random.seed(random_seed)
+    indices_to_keep = []
+    
+    for label in np.unique(y):
+        label_indices = np.where(y == label)[0]
+        n_samples = len(label_indices)
+        
+        if label in high_classes:
+            indices_to_keep.extend(label_indices)
+        elif label in medium_classes:
+            n_keep = max(1, int(n_samples * medium_ratio))
+            selected = np.random.choice(label_indices, n_keep, replace=False)
+            indices_to_keep.extend(selected)
+        elif label in low_classes:
+            n_keep = max(1, int(n_samples * low_ratio))
+            selected = np.random.choice(label_indices, n_keep, replace=False)
+            indices_to_keep.extend(selected)
+        else:
+            # If class not specified, keep it (treat as high)
+            indices_to_keep.extend(label_indices)
+            
+    indices_to_keep = np.array(indices_to_keep)
+    np.random.shuffle(indices_to_keep)
+    
+    return X[indices_to_keep], y[indices_to_keep]
 
 
 class MLP(nn.Module):
     """Multi-Layer Perceptron for binary classification."""
     
-    def __init__(self, input_dim, hidden_dims=[5, 10, 5]):
+    def __init__(self, input_dim, hidden_dims=[5, 10, 5], num_classes=5):
         super().__init__()
         
         layers = []
@@ -85,9 +123,9 @@ class MLP(nn.Module):
             ])
             prev_dim = hidden_dim
         
-        # Output layer for binary classification
-        layers.append(nn.Linear(prev_dim, 1))
-        #layers.append(nn.Sigmoid())
+        # Output layer for multi-class classification
+        layers.append(nn.Linear(prev_dim, num_classes))
+        #layers.append(nn.Softmax(dim=1))
         
         self.network = nn.Sequential(*layers)
     
@@ -106,13 +144,13 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
         batch_x, batch_y = batch_x.to(device), batch_y.to(device)
         
         optimizer.zero_grad()
-        outputs = model(batch_x).squeeze()
+        outputs = model(batch_x)
         loss = criterion(outputs, batch_y)
         loss.backward()
         optimizer.step()
         
         total_loss += loss.item() * batch_x.size(0)
-        preds = (outputs > 0.5).float()
+        preds = torch.argmax(outputs, dim=1)
         all_preds.extend(preds.cpu().numpy())
         all_labels.extend(batch_y.cpu().numpy())
     
@@ -135,19 +173,19 @@ def evaluate(model, dataloader, criterion, device):
             #print so i can debug the batch shapes
 
             
-            outputs = model(batch_x).squeeze(-1)
+            outputs = model(batch_x)
             loss = criterion(outputs, batch_y)
             
             total_loss += loss.item() * batch_x.size(0)
-            preds = (outputs > 0.5).float()
+            preds = torch.argmax(outputs, dim=1)
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(batch_y.cpu().numpy())
     
     avg_loss = total_loss / len(dataloader.dataset)
     accuracy = accuracy_score(all_labels, all_preds)
-    precision = precision_score(all_labels, all_preds, zero_division=0)
-    recall = recall_score(all_labels, all_preds, zero_division=0)
-    f1 = f1_score(all_labels, all_preds, zero_division=0)
+    precision = precision_score(all_labels, all_preds, average='weighted', zero_division=0)
+    recall = recall_score(all_labels, all_preds, average='weighted', zero_division=0)
+    f1 = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
     
     return avg_loss, accuracy, precision, recall, f1, all_preds, all_labels
 
@@ -156,7 +194,7 @@ def main(random_seed=42, dataset=None):
 
 
         # Configuration
-        data_path = f"Keel_data_sets/{dataset}.dat"
+        data_path = f"kaggle_data/{dataset}.csv"
         hidden_dims = [5, 10, 5]  # Hidden layer shape 5x10x5
         learning_rate = 0.001  # Adam learning rate
         batch_size = 32
@@ -173,7 +211,7 @@ def main(random_seed=42, dataset=None):
         
         # Load and parse data
         print(f"\nLoading data from: {data_path}")
-        X, y = parse_keel_dat(data_path)
+        X, y = parse_kaggle_dat(data_path)
         print(f"First 5 samples of X:\n{X[0:5]}")
         print(f"First 5 labels of y:\n{y[0:5]}")
         # Print imbalance information
@@ -193,9 +231,9 @@ def main(random_seed=42, dataset=None):
         
         # Convert to PyTorch tensors
         X_train_tensor = torch.FloatTensor(X_train)
-        y_train_tensor = torch.FloatTensor(y_train)
+        y_train_tensor = torch.LongTensor(y_train)
         X_test_tensor = torch.FloatTensor(X_test)
-        y_test_tensor = torch.FloatTensor(y_test)
+        y_test_tensor = torch.LongTensor(y_test)
         
         # Create DataLoaders
         train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
@@ -211,11 +249,20 @@ def main(random_seed=42, dataset=None):
         print(f"\nModel architecture:")
         print(model)
         
-        # Loss function with class weights to handle imbalance
-        num_positives = sum(y)
-        num_negatives = len(y) - num_positives
-        pos_weight = torch.tensor([num_negatives / num_positives]).to(device)
-        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        # Calculate class weights to handle imbalance
+        # Cast to int because labels are loaded as floats
+        y_train_int = y_train.astype(int)
+        class_counts = np.bincount(y_train_int)
+        # Standard formula for balanced weights: n_samples / (n_classes * n_samples_j)
+        num_classes_present = len(np.unique(y_train_int))
+        total_samples = len(y_train_int)
+        class_weights = total_samples / (num_classes_present * np.maximum(class_counts, 1))
+        
+        class_weights_tensor = torch.FloatTensor(class_weights).to(device)
+        print(f"\nClass Weights: {class_weights}")
+
+        # Loss function
+        criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)
         
         # Optimizer
         optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
@@ -278,13 +325,13 @@ def main(random_seed=42, dataset=None):
 
 
 if __name__ == "__main__":
-    runs = 10
+    runs = 1
     tot_f1 = 0.0
     f1_scores = []
     for i in range(runs):
         random_seed = np.random.randint(1, 10000)
         print(f"\n\nRunning experiment with random seed: {random_seed}")
-        test_acc, test_prec, test_rec, test_f1 = main(random_seed=random_seed, dataset="glass0")     
+        test_acc, test_prec, test_rec, test_f1 = main(random_seed=random_seed, dataset="chronic_disease_dataset")     
         tot_f1 += test_f1
         f1_scores.append(test_f1)
     avg_f1 = tot_f1 / runs

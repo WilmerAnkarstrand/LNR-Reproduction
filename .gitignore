@@ -12,7 +12,7 @@ data/
 
 # Saved training outputs
 saved/
-keel/
+
 
 # Environment
 .env
