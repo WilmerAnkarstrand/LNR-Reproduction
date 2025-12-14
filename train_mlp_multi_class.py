@@ -66,40 +66,94 @@ def print_imbalance_info(y):
     return counts
 
 
-def make_imbalanced_dataset(X, y, high_classes, medium_classes, low_classes, medium_ratio, low_ratio, random_seed=42):
+def make_imbalanced_dataset(X, y, high_classes, medium_classes, low_classes, 
+                            medium_target_pct=0.35, low_target_pct=0.07,
+                            min_samples_per_class=15, random_seed=42):
     """
-    Creates an imbalanced version of the dataset.
+    Creates an imbalanced version of the dataset with target percentages.
     
     Args:
         X: Features
         y: Labels
-        high_classes: List of class labels for the 'high' frequency group (kept at 100%)
+        high_classes: List of class labels for the 'high' frequency group (gets remaining %)
         medium_classes: List of class labels for the 'medium' frequency group
         low_classes: List of class labels for the 'low' frequency group
-        medium_ratio: Ratio of samples to keep for medium classes (0 < ratio <= 1)
-        low_ratio: Ratio of samples to keep for low classes (0 < ratio <= 1)
+        medium_target_pct: Target percentage for EACH medium class (0.30-0.40 total for all medium)
+        low_target_pct: Target percentage for EACH low class (0.05-0.09 range)
+        min_samples_per_class: Minimum samples per class (15 ensures ~10 after 70% train split)
         random_seed: Random seed for reproducibility
     """
     np.random.seed(random_seed)
+    
+    # First, calculate how many samples we need from each class
+    # to achieve target percentages while ensuring minimums
+    class_counts = {}
+    for label in np.unique(y):
+        class_counts[label] = np.sum(y == label)
+    
+    # Calculate samples to keep for each class type
+    samples_to_keep = {}
+    
+    # For high classes, we'll keep all samples initially
+    for label in high_classes:
+        samples_to_keep[label] = class_counts[label]
+    
+    # For medium and low, we need to calculate based on target percentages
+    # We'll iterate to find the right balance
+    total_high = sum(class_counts[c] for c in high_classes)
+    
+    # Target: low_target_pct per low class, medium_target_pct per medium class
+    # Let's solve: total = high + medium + low
+    # medium_pct = medium_samples / total => medium_samples = medium_pct * total
+    # We need to find total such that percentages work out
+    
+    # Using the constraint that high classes keep all samples:
+    # total = high + sum(medium) + sum(low)
+    # Each medium class should be medium_target_pct of total
+    # Each low class should be low_target_pct of total
+    
+    num_medium = len(medium_classes)
+    num_low = len(low_classes)
+    
+    # high_pct = 1 - (num_medium * medium_target_pct) - (num_low * low_target_pct)
+    high_pct = 1.0 - (num_medium * medium_target_pct) - (num_low * low_target_pct)
+    
+    if high_pct <= 0:
+        raise ValueError("Target percentages too high, no room for majority class")
+    
+    # total = total_high / high_pct
+    estimated_total = total_high / high_pct
+    
+    # Calculate samples for medium and low classes
+    for label in medium_classes:
+        target_samples = int(estimated_total * medium_target_pct)
+        # Ensure we don't exceed available samples and meet minimum
+        samples_to_keep[label] = max(min_samples_per_class, 
+                                      min(target_samples, class_counts[label]))
+    
+    for label in low_classes:
+        target_samples = int(estimated_total * low_target_pct)
+        # Ensure we don't exceed available samples and meet minimum
+        samples_to_keep[label] = max(min_samples_per_class, 
+                                      min(target_samples, class_counts[label]))
+    
+    # Handle any classes not specified (treat as high)
+    for label in np.unique(y):
+        if label not in samples_to_keep:
+            samples_to_keep[label] = class_counts[label]
+    
+    # Now select the samples
     indices_to_keep = []
     
     for label in np.unique(y):
         label_indices = np.where(y == label)[0]
-        n_samples = len(label_indices)
+        n_keep = samples_to_keep[label]
         
-        if label in high_classes:
+        if n_keep >= len(label_indices):
             indices_to_keep.extend(label_indices)
-        elif label in medium_classes:
-            n_keep = max(1, int(n_samples * medium_ratio))
-            selected = np.random.choice(label_indices, n_keep, replace=False)
-            indices_to_keep.extend(selected)
-        elif label in low_classes:
-            n_keep = max(1, int(n_samples * low_ratio))
-            selected = np.random.choice(label_indices, n_keep, replace=False)
-            indices_to_keep.extend(selected)
         else:
-            # If class not specified, keep it (treat as high)
-            indices_to_keep.extend(label_indices)
+            selected = np.random.choice(label_indices, n_keep, replace=False)
+            indices_to_keep.extend(selected)
             
     indices_to_keep = np.array(indices_to_keep)
     np.random.shuffle(indices_to_keep)
@@ -225,15 +279,19 @@ def main(random_seed=42, dataset=None):
         medium_classes = [1, 3]
         low_classes = [2, 4]
         
-        # medium_ratio=0.25 means we keep 25% of the original samples for medium classes
-        # low_ratio=0.02 means we keep 2% of the original samples for low classes
+        # Target percentages for the imbalanced dataset:
+        # - Low classes: ~3.5% each, so ~7% total for both low classes
+        # - Medium classes: ~17.5% each (so ~35% total, within 30-40% range)
+        # - Majority (high) class: remaining ~58%
+        # min_samples_per_class=15 ensures at least 10 samples in training after 70/30 split
         X, y = make_imbalanced_dataset(
             X, y, 
             high_classes=high_classes,
             medium_classes=medium_classes,
             low_classes=low_classes,
-            medium_ratio=0.25,
-            low_ratio=0.02,
+            medium_target_pct=0.175,  # Each medium class ~17.5% (total ~35%)
+            low_target_pct=0.035,     # Each low class ~3.5% (total ~7%)
+            min_samples_per_class=15,  # Ensures ~10+ in training set after split
             random_seed=random_seed
         )
         

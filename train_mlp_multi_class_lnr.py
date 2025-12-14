@@ -127,68 +127,48 @@ class MLP(nn.Module):
     def forward(self, x):
         return self.network(x)
 
-def train_epoch_lnr(model, dataloader, criterion, optimizer, device, t_flip):
+def lnr(model, x_train, y_train, device, t_flip):
     """
     Train ONLY the last layer using LNR logic.
     Assumes model is already pre-trained and hidden layers are frozen.
     """
-    model.train()
-    total_loss = 0.0
-    total_flips = 0
-    all_preds = []
-    all_labels = []
+        
+    # Compute mean and std of softmax outputs over entire training set
+    logits = model(torch.FloatTensor(x_train).to(device))
+    all_logits = torch.cat([logits], dim=0)
     
-    for batch_x, batch_y in dataloader:
-        batch_x, batch_y = batch_x.to(device), batch_y.to(device)
-        
-        optimizer.zero_grad()
-        outputs = model(batch_x).squeeze()
-        
-        # --- LNR Logic ---
-        Q_x = nn.Softmax(batch_y.clone())
-        
-        with torch.no_grad():
-            # 1. Get Posterior Probabilities
-            probs = torch.sigmoid(outputs)
+    Q = nn.Softmax(dim=1)(all_logits)
+    mean = Q.mean(dim=0)
+    std = Q.std(dim=0)
+
+    class_count = torch.tensor([(y_train == i).sum().item() for i in range(int(y_train.max()) + 1)], device=device, dtype=torch.float32)
+    # θC ← 1 − minMax(NC) where NC counts the samples of each class
+    theta_c = 1 - (class_count - class_count.min()) / (class_count.max() - class_count.min())
+
+    Z_score_x = (Q - mean) / std
+    
+    # Fix broadcasting: [1, C] - [B, 1] -> [B, C]
+    flip_strength = torch.clamp(theta_c.unsqueeze(0) - theta_c[y_train].unsqueeze(1), min=0)
+    
+    class_fliprate = torch.clamp(torch.tanh(Z_score_x - t_flip), min=0) * flip_strength
+    bernoulli_samples = torch.bernoulli(class_fliprate)
+    total_flips = 0
+    # For each sample, check if any class got a 1 (flip should happen)
+    for i in range(len(y_train)):
+        if bernoulli_samples[i].sum() > 0:  # U contains 1
+            # Find indices where bernoulli == 1
+            flip_candidates = (bernoulli_samples[i] == 1).nonzero(as_tuple=True)[0]
             
-            # 2. Identify Majority Samples (Class 0)
-            maj_indices = (batch_y == 0).nonzero(as_tuple=True)[0]
+            # Among candidates, pick the one with max flip rate
+            # y^t ← C[indexOf(max(F_x[U == 1]))]
+            max_idx = class_fliprate[i, flip_candidates].argmax()
+            new_class = flip_candidates[max_idx]
             
-            # forloop potentiellt
-            if len(maj_indices) > 1:
-                # Get probs of majority samples looking like minority
-                p_maj = probs[maj_indices]
-                
-                # 3. Z-score Standardization
-                mu = p_maj.mean()
-                sigma = p_maj.std()
-                
-                if sigma > 1e-6:
-                    z_scores = (p_maj - mu) / sigma
-                    
-                    # 4. Calculate Flip Rate (rho) and Flip
-                    # rho = max(tanh(Z - t_flip), 0)
-                    rho = torch.tanh(z_scores - t_flip).clamp(min=0)
-                    
-                    # Bernoulli sampling
-                    flip_mask = torch.bernoulli(rho).bool()
-                    indices_to_flip = maj_indices[flip_mask]
-                    
-                    if len(indices_to_flip) > 0:
-                        targets[indices_to_flip] = 1.0
-                        total_flips += len(indices_to_flip)
-        
-        # Calculate loss against LNR targets
-        loss = criterion(outputs, targets)
-        loss.backward()
-        optimizer.step()
-        
-        total_loss += loss.item() * batch_x.size(0)
-        preds = (outputs > 0.5).float()
-        all_preds.extend(preds.cpu().numpy())
-        all_labels.extend(batch_y.cpu().numpy())
-        
-    return total_loss / len(dataloader.dataset), accuracy_score(all_labels, all_preds), total_flips
+            # Relabel
+            y_train[i] = new_class
+            total_flips += 1
+    return y_train
+
 
 def evaluate(model, dataloader, criterion, device):
     model.eval()
@@ -208,8 +188,8 @@ def evaluate(model, dataloader, criterion, device):
 
 def main(random_seed=42, dataset=None):
     # Config
-    data_path = f"Keel_data_sets/{dataset}.dat"
-    model_path = f"keel/mlp/best_mlp_{dataset}.pth"
+    data_path = dataset
+    model_path = "keel/mlp/best_mlp_chronic_disease_dataset.pth"
     
     # LNR Config
     # old t_flip
@@ -226,7 +206,7 @@ def main(random_seed=42, dataset=None):
         print(f"Data not found: {data_path}")
         return 0,0,0,0
         
-    X, y = parse_keel_dat(data_path)
+    X, y = parse_kaggle_dat(data_path)
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, stratify=y, random_state=random_seed)
     
     scaler = StandardScaler()
@@ -244,140 +224,18 @@ def main(random_seed=42, dataset=None):
         print("ERROR: Pre-trained model not found!")
         return
     
-    t_flip = select_best_t_flip(
-    X_train, 
-    y_train, 
-    base_state, 
-    input_dim=X_train.shape[1], 
-    device=device,
-    lnr_epochs=15 # Can be lower than final training to save time
-)
-     # ============================================================
-    # STEP 4: FINAL TRAINING WITH SELECTED t_flip
-    # ============================================================
-    
+    y_train = lnr(base_model.to(device),
+        X_train,y_train,
+        device,
+        t_flip=0.5
+    )
+
     # Prepare final loaders
-    train_loader = DataLoader(TensorDataset(torch.FloatTensor(X_train), torch.FloatTensor(y_train)), batch_size=32, shuffle=True)
-    test_loader = DataLoader(TensorDataset(torch.FloatTensor(X_test), torch.FloatTensor(y_test)), batch_size=32, shuffle=False)
+    train_loader = DataLoader(TensorDataset(torch.FloatTensor(X_train), torch.LongTensor(y_train)), batch_size=32, shuffle=True)
+    test_loader = DataLoader(TensorDataset(torch.FloatTensor(X_test), torch.LongTensor(y_test)), batch_size=32, shuffle=False)
     
-    # 2. Initialize Model
-    model = MLP(input_dim=X_train.shape[1]).to(device)
-    model.load_state_dict(base_state)
     
-    # 3. Load Pre-trained Weights old load model
-    #if os.path.exists(model_path):
-    #    print(f"Loading pre-trained model from {model_path}...")
-    #    model.load_state_dict(torch.load(model_path))
-    #else:
-    #    print("ERROR: Pre-trained model not found! Training from scratch (not desired behavior).")
-    
-    # 4. Freeze Hidden Layers & Select Last Layer for Optimization
-    # Access the sequential container
-    # Layers 0 to -2 are hidden layers + activations. Layer -1 is the final Linear.
-    
-    # Freeze everything first
-    for param in model.parameters():
-        param.requires_grad = False
-        
-    # Unfreeze the last layer (Index -1 in the Sequential list)
-    # Note: model.network is the Sequential object
-    last_layer = model.network[-1]
-    for param in last_layer.parameters():
-        param.requires_grad = True
-        
-    print("Feature extraction layers frozen. Only training last layer.")
-
-    # Optimizer (Only pass last layer parameters)
-    optimizer = optim.Adam(last_layer.parameters(), lr=learning_rate)
-    
-    # Loss (Keep class weights if desired, or remove if LNR handles balance sufficiently)
-    num_pos = sum(y_train)
-    pos_weight = torch.tensor([(len(y_train)-num_pos)/num_pos]).to(device)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-
-    print(f"\nStarting LNR Fine-tuning for {lnr_epochs} epochs...")
-    
-    best_f1 = 0.0
-    
-    for epoch in range(lnr_epochs):
-        loss, acc, flips = train_epoch_lnr(model, train_loader, criterion, optimizer, device, t_flip)
-        _, _, val_f1 = evaluate(model, test_loader, criterion, device)
-        
-        if val_f1 > best_f1:
-            best_f1 = val_f1
-            # Save the LNR-tuned model (optional, maybe to a new file)
-            torch.save(model.state_dict(), f'keel/mlp/best_mlp_lnr_{dataset}.pth')
-            
-        if (epoch+1) % 10 == 0:
-            print(f"Epoch {epoch+1}: Loss {loss:.4f}, Flips: {flips}, Val F1: {val_f1:.4f}")
-
-    # Final Eval
-    model.load_state_dict(torch.load(f'keel/mlp/best_mlp_lnr_{dataset}.pth'))
-    _, acc, f1 = evaluate(model, test_loader, criterion, device)
-    
-    print(f"\nFinal Result with LNR - F1: {f1:.4f}, Acc: {acc:.4f}")
-    return acc, 0, 0, f1
-
-
-def select_best_t_flip(X_train, y_train, base_model_state, input_dim, device, lnr_epochs=20):
-    """
-    Performs K-Fold CV to find the best t_flip threshold.
-    """
-    # Define candidates based on Figure 3 range (-2 to 4) or typical Z-scores
-    candidates = [-1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0]
-    best_t = 0.5
-    best_avg_f1 = -1.0
-    
-    print(f"\n--- Starting Cross-Validation for t_flip selection ---")
-    skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=42) # 3 or 5 folds
-    
-    for t in candidates:
-        fold_f1s = []
-        
-        for fold_idx, (train_idx, val_idx) in enumerate(skf.split(X_train, y_train)):
-            # Split data
-            X_tr_fold, y_tr_fold = X_train[train_idx], y_train[train_idx]
-            X_val_fold, y_val_fold = X_train[val_idx], y_train[val_idx]
-            
-            # Create Loaders
-            train_loader = DataLoader(TensorDataset(torch.FloatTensor(X_tr_fold), torch.FloatTensor(y_tr_fold)), batch_size=32, shuffle=True)
-            val_loader = DataLoader(TensorDataset(torch.FloatTensor(X_val_fold), torch.FloatTensor(y_val_fold)), batch_size=32, shuffle=False)
-            
-            # Reset Model to Pre-trained State
-            model = MLP(input_dim=input_dim).to(device)
-            model.load_state_dict(base_model_state)
-            
-            # Freeze Hidden
-            for param in model.parameters(): param.requires_grad = False
-            for param in model.network[-1].parameters(): param.requires_grad = True
-            
-            optimizer = optim.Adam(model.network[-1].parameters(), lr=0.001)
-            
-            # Recalculate class weight for this fold
-            num_pos = sum(y_tr_fold)
-            pos_weight = torch.tensor([(len(y_tr_fold)-num_pos)/max(num_pos, 1)]).to(device)
-            criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-            
-            # Train for a few epochs
-            # Note: We use fewer epochs for CV to save time, or same as main
-            for _ in range(lnr_epochs):
-                train_epoch_lnr(model, train_loader, criterion, optimizer, device, t)
-            
-            # Evaluate
-            _, _, f1 = evaluate(model, val_loader, criterion, device)
-            fold_f1s.append(f1)
-            
-        avg_f1 = np.mean(fold_f1s)
-        print(f"t_flip: {t:.1f} | Avg CV F1: {avg_f1:.4f}")
-        
-        if avg_f1 > best_avg_f1:
-            best_avg_f1 = avg_f1
-            best_t = t
-            
-    print(f"Selected Best t_flip: {best_t} (F1: {best_avg_f1:.4f})")
-    print(f"----------------------------------------------------\n")
-    return best_t
 
 if __name__ == "__main__":
     # Ensure you run the original script first to generate 'best_mlp_glass0.pth'
-    main(dataset="ecoli1")
+    main(dataset="kaggle_data/chronic_disease_dataset.csv")

@@ -52,6 +52,47 @@ class MLP(nn.Module):
     def forward(self, x):
         return self.network(x)
 
+def apply_lnr_globally(model, X, y, t_flip, device):
+    """
+    Applies LNR logic once on the entire dataset to generate new targets.
+    """
+    model.eval()
+    X_tensor = torch.FloatTensor(X).to(device)
+    y_tensor = torch.FloatTensor(y).to(device)
+
+    with torch.no_grad():
+        outputs = model(X_tensor).squeeze()
+        probs = torch.sigmoid(outputs)
+        
+        # Identify Majority Samples (Class 0)
+        maj_indices = (y_tensor == 0).nonzero(as_tuple=True)[0]
+        
+        targets = y_tensor.clone()
+        total_flips = 0
+        
+        if len(maj_indices) > 1:
+            p_maj = probs[maj_indices]
+            
+            # Global Z-score Standardization
+            mu = p_maj.mean()
+            sigma = p_maj.std()
+            
+            if sigma > 1e-6:
+                z_scores = (p_maj - mu) / sigma
+                
+                # Calculate Flip Rate (rho) and Flip
+                rho = torch.tanh(z_scores - t_flip).clamp(min=0)
+                
+                # Bernoulli sampling
+                flip_mask = torch.bernoulli(rho).bool()
+                indices_to_flip = maj_indices[flip_mask]
+                
+                if len(indices_to_flip) > 0:
+                    targets[indices_to_flip] = 1.0
+                    total_flips = len(indices_to_flip)
+                    
+    return targets.cpu().numpy(), total_flips
+
 def train_epoch_lnr(model, dataloader, criterion, optimizer, device, t_flip):
     """
     Train ONLY the last layer using LNR logic.
@@ -59,7 +100,6 @@ def train_epoch_lnr(model, dataloader, criterion, optimizer, device, t_flip):
     """
     model.train()
     total_loss = 0.0
-    total_flips = 0
     all_preds = []
     all_labels = []
     
@@ -69,42 +109,10 @@ def train_epoch_lnr(model, dataloader, criterion, optimizer, device, t_flip):
         optimizer.zero_grad()
         outputs = model(batch_x).squeeze()
         
-        # --- LNR Logic ---
-        targets = batch_y.clone()
-        
-        with torch.no_grad():
-            # 1. Get Posterior Probabilities
-            probs = torch.sigmoid(outputs)
-            
-            # 2. Identify Majority Samples (Class 0)
-            maj_indices = (batch_y == 0).nonzero(as_tuple=True)[0]
-            
-            # forloop potentiellt
-            if len(maj_indices) > 1:
-                # Get probs of majority samples looking like minority
-                p_maj = probs[maj_indices]
-                
-                # 3. Z-score Standardization
-                mu = p_maj.mean()
-                sigma = p_maj.std()
-                
-                if sigma > 1e-6:
-                    z_scores = (p_maj - mu) / sigma
-                    
-                    # 4. Calculate Flip Rate (rho) and Flip
-                    # rho = max(tanh(Z - t_flip), 0)
-                    rho = torch.tanh(z_scores - t_flip).clamp(min=0)
-                    
-                    # Bernoulli sampling
-                    flip_mask = torch.bernoulli(rho).bool()
-                    indices_to_flip = maj_indices[flip_mask]
-                    
-                    if len(indices_to_flip) > 0:
-                        targets[indices_to_flip] = 1.0
-                        total_flips += len(indices_to_flip)
+       
         
         # Calculate loss against LNR targets
-        loss = criterion(outputs, targets)
+        loss = criterion(outputs, batch_y)
         loss.backward()
         optimizer.step()
         
@@ -113,7 +121,7 @@ def train_epoch_lnr(model, dataloader, criterion, optimizer, device, t_flip):
         all_preds.extend(preds.cpu().numpy())
         all_labels.extend(batch_y.cpu().numpy())
         
-    return total_loss / len(dataloader.dataset), accuracy_score(all_labels, all_preds), total_flips
+    return total_loss / len(dataloader.dataset), accuracy_score(all_labels, all_preds)
 
 def evaluate(model, dataloader, criterion, device):
     model.eval()
@@ -180,14 +188,21 @@ def main(random_seed=42, dataset=None):
      # ============================================================
     # STEP 4: FINAL TRAINING WITH SELECTED t_flip
     # ============================================================
-    
-    # Prepare final loaders
-    train_loader = DataLoader(TensorDataset(torch.FloatTensor(X_train), torch.FloatTensor(y_train)), batch_size=32, shuffle=True)
-    test_loader = DataLoader(TensorDataset(torch.FloatTensor(X_test), torch.FloatTensor(y_test)), batch_size=32, shuffle=False)
-    
-    # 2. Initialize Model
+
     model = MLP(input_dim=X_train.shape[1]).to(device)
     model.load_state_dict(base_state)
+
+    # Apply LNR globally ONCE using the base model state
+    print(f"Applying LNR logic globally with t_flip={t_flip}...")
+    y_train_lnr, total_flips = apply_lnr_globally(model, X_train, y_train, t_flip, device)
+    print(f"Total labels flipped: {total_flips}")
+
+    
+    # Prepare final loaders
+    train_loader = DataLoader(TensorDataset(torch.FloatTensor(X_train), torch.FloatTensor(y_train_lnr)), batch_size=32, shuffle=True)
+    test_loader = DataLoader(TensorDataset(torch.FloatTensor(X_test), torch.FloatTensor(y_test)), batch_size=32, shuffle=False)
+    
+
     
     # 3. Load Pre-trained Weights old load model
     #if os.path.exists(model_path):
@@ -225,7 +240,7 @@ def main(random_seed=42, dataset=None):
     best_f1 = 0.0
     
     for epoch in range(lnr_epochs):
-        loss, acc, flips = train_epoch_lnr(model, train_loader, criterion, optimizer, device, t_flip)
+        loss, acc = train_epoch_lnr(model, train_loader, criterion, optimizer, device, t_flip)
         _, _, val_f1 = evaluate(model, test_loader, criterion, device)
         
         if val_f1 > best_f1:
@@ -234,7 +249,7 @@ def main(random_seed=42, dataset=None):
             torch.save(model.state_dict(), f'keel/mlp/best_mlp_lnr_{dataset}.pth')
             
         if (epoch+1) % 10 == 0:
-            print(f"Epoch {epoch+1}: Loss {loss:.4f}, Flips: {flips}, Val F1: {val_f1:.4f}")
+            print(f"Epoch {epoch+1}: Loss {loss:.4f}, Flips: {total_flips}, Val F1: {val_f1:.4f}")
 
     # Final Eval
     model.load_state_dict(torch.load(f'keel/mlp/best_mlp_lnr_{dataset}.pth'))
@@ -264,13 +279,16 @@ def select_best_t_flip(X_train, y_train, base_model_state, input_dim, device, ln
             X_tr_fold, y_tr_fold = X_train[train_idx], y_train[train_idx]
             X_val_fold, y_val_fold = X_train[val_idx], y_train[val_idx]
             
-            # Create Loaders
-            train_loader = DataLoader(TensorDataset(torch.FloatTensor(X_tr_fold), torch.FloatTensor(y_tr_fold)), batch_size=32, shuffle=True)
-            val_loader = DataLoader(TensorDataset(torch.FloatTensor(X_val_fold), torch.FloatTensor(y_val_fold)), batch_size=32, shuffle=False)
-            
             # Reset Model to Pre-trained State
             model = MLP(input_dim=input_dim).to(device)
             model.load_state_dict(base_model_state)
+            
+            # Apply LNR globally for this fold
+            y_tr_fold_lnr, _ = apply_lnr_globally(model, X_tr_fold, y_tr_fold, t, device)
+
+            # Create Loaders
+            train_loader = DataLoader(TensorDataset(torch.FloatTensor(X_tr_fold), torch.FloatTensor(y_tr_fold_lnr)), batch_size=32, shuffle=True)
+            val_loader = DataLoader(TensorDataset(torch.FloatTensor(X_val_fold), torch.FloatTensor(y_val_fold)), batch_size=32, shuffle=False)
             
             # Freeze Hidden
             for param in model.parameters(): param.requires_grad = False
