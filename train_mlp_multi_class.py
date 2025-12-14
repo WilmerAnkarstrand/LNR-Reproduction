@@ -10,7 +10,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, classification_report
 import os
 import sys
 
@@ -215,6 +215,29 @@ def main(random_seed=42, dataset=None):
         print(f"First 5 samples of X:\n{X[0:5]}")
         print(f"First 5 labels of y:\n{y[0:5]}")
         # Print imbalance information
+        print("Original Dataset Imbalance:")
+        print_imbalance_info(y)
+
+        # Make dataset more imbalanced
+        # Current: 0:1322, 1:752, 2:521, 3:569, 4:334
+        # We keep class 0 as high, 1 and 3 as medium, 2 and 4 as low
+        high_classes = [0]
+        medium_classes = [1, 3]
+        low_classes = [2, 4]
+        
+        # medium_ratio=0.25 means we keep 25% of the original samples for medium classes
+        # low_ratio=0.02 means we keep 2% of the original samples for low classes
+        X, y = make_imbalanced_dataset(
+            X, y, 
+            high_classes=high_classes,
+            medium_classes=medium_classes,
+            low_classes=low_classes,
+            medium_ratio=0.25,
+            low_ratio=0.02,
+            random_seed=random_seed
+        )
+        
+        print("New Imbalanced Dataset Information:")
         print_imbalance_info(y)
         
         # Split data into train and test sets
@@ -318,8 +341,10 @@ def main(random_seed=42, dataset=None):
         # Confusion Matrix
         cm = confusion_matrix(labels, preds)
         print(f"\nConfusion Matrix:")
-        print(f"  TN={cm[0,0]:3d}  FP={cm[0,1]:3d}")
-        print(f"  FN={cm[1,0]:3d}  TP={cm[1,1]:3d}")
+        print(cm)
+
+        print("\nClassification Report:")
+        print(classification_report(labels, preds, zero_division=0))
     
         return test_acc, test_prec, test_rec, test_f1
 
