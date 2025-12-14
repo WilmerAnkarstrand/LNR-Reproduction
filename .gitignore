@@ -9,7 +9,6 @@ __pycache__/
 
 # Data directories
 data/
-Keel_data_sets/
 
 # Saved training outputs
 saved/
