@@ -5,8 +5,7 @@ __pycache__/
 *.pyc
 
 # Model weights and checkpoints
-*.pth
-*.pth.tar
+
 
 # Data directories
 data/
