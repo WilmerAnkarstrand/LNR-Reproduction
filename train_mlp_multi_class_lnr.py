@@ -190,7 +190,7 @@ def lnr(model, x_train, y_train, device, t_flip):
     return y_train_flipped
 
 
-def evaluate(model, dataloader, criterion, device):
+def evaluate_legacy(model, dataloader, criterion, device):
     model.eval()
     total_loss = 0.0
     all_preds = []
@@ -205,6 +205,33 @@ def evaluate(model, dataloader, criterion, device):
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(batch_y.cpu().numpy())
     return total_loss/len(dataloader.dataset), accuracy_score(all_labels, all_preds), f1_score(all_labels, all_preds, zero_division=0)
+
+
+
+def evaluate(model, data_loader, criterion, device):
+    """Evaluate model on a dataset"""
+    model.eval()
+    test_loss = 0.0
+    correct = 0
+    total = 0
+    
+    with torch.no_grad():
+        for batch_x, batch_y in data_loader:
+            batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+            outputs = model(batch_x)
+            loss = criterion(outputs, batch_y)
+            
+            test_loss += loss.item()
+            _, predicted = outputs.max(1)
+            total += batch_y.size(0)
+            correct += predicted.eq(batch_y).sum().item()
+    
+    model.train()
+    accuracy = 100. * correct / total
+    avg_loss = test_loss / len(data_loader)
+    
+    return accuracy, avg_loss
+
 
 def main(random_seed=42, dataset=None):
     # Config
@@ -238,22 +265,100 @@ def main(random_seed=42, dataset=None):
     base_model = MLP(input_dim=X_train.shape[1])
     if os.path.exists(model_path):
         print(f"Loading pre-trained model from {model_path}...")
-        base_state = torch.load(model_path)
+        base_state = torch.load(model_path, map_location=device)
         base_model.load_state_dict(base_state)
     else:
         print("ERROR: Pre-trained model not found!")
         return
     
-    y_train = lnr(base_model.to(device),
+    base_model = base_model.to(device)
+
+    # 3. Generate Flipped Labels using LNR
+    print("Generating flipped labels with LNR...")
+    y_train = lnr(base_model,
         X_train,y_train,
         device,
         t_flip=0.5
     )
 
-    # Prepare final loaders
-    train_loader = DataLoader(TensorDataset(torch.FloatTensor(X_train), torch.LongTensor(y_train)), batch_size=32, shuffle=True)
-    test_loader = DataLoader(TensorDataset(torch.FloatTensor(X_test), torch.LongTensor(y_test)), batch_size=32, shuffle=False)
     
+    # 4. Freeze Feature Layers (freeze all except the final classifier layer)
+    # Freeze all parameters first
+    for param in base_model.parameters():
+        param.requires_grad = False
+
+    # Unfreeze only the last Linear layer (assumes final module in `network` is the output Linear)
+    for param in base_model.network[-1].parameters():
+        param.requires_grad = True
+    
+    print("Trainable parameters:")
+    for name, param in base_model.named_parameters():
+        if param.requires_grad:
+            print(f"  {name}: {param.shape}")
+
+    # 5. Prepare Data Loaders with Flipped Labels
+    train_dataset = TensorDataset(
+        torch.tensor(X_train, dtype=torch.float32),
+        y_train  # Already a tensor from lnr()
+    )
+    test_dataset = TensorDataset(
+        torch.tensor(X_test, dtype=torch.float32),
+        torch.tensor(y_test, dtype=torch.long)
+    )
+    
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+
+    # 6. Setup Optimizer (only for trainable parameters)
+    optimizer = torch.optim.Adam(
+        filter(lambda p: p.requires_grad, base_model.parameters()),
+        lr=learning_rate
+    )
+    criterion = nn.CrossEntropyLoss()
+
+    #Original result
+    org_acc, org_loss = evaluate(base_model, test_loader, criterion, device)
+    print(f"Original Test Accuracy (before LNR training): {org_acc:.2f}%")
+
+    # 7. Train Only the Last Layer with Flipped Labels
+    print(f"\nTraining classifier for {lnr_epochs} epochs with LNR labels...")
+    base_model.train()
+    
+    for epoch in range(lnr_epochs):
+        train_loss = 0.0
+        correct = 0
+        total = 0
+        
+        for batch_x, batch_y in train_loader:
+            batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+            
+            optimizer.zero_grad()
+            outputs = base_model(batch_x)
+            loss = criterion(outputs, batch_y)
+            loss.backward()
+            optimizer.step()
+            
+            train_loss += loss.item()
+            _, predicted = outputs.max(1)
+            total += batch_y.size(0)
+            correct += predicted.eq(batch_y).sum().item()
+        
+        train_acc = 100. * correct / total
+        
+        # Evaluate on test set (with original labels)
+        if (epoch + 1) % 10 == 0 or epoch == 0:
+            test_acc, test_loss = evaluate(base_model, test_loader, criterion, device)
+            print(f"Epoch {epoch+1}/{lnr_epochs} - "
+                  f"Train Loss: {train_loss/len(train_loader):.4f}, "
+                  f"Train Acc: {train_acc:.2f}%, "
+                  f"Test Acc: {test_acc:.2f}%")
+    
+    # 8. Final Evaluation
+    print("\nFinal Evaluation on Test Set (Original Labels):")
+    final_acc, final_loss = evaluate(base_model, test_loader, criterion, device)
+    print(f"Test Accuracy: {final_acc:.2f}%")
+    
+    return final_acc
     
 
 if __name__ == "__main__":
