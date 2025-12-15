@@ -287,7 +287,7 @@ if __name__ == "__main__":
     for i in range(runs):
         random_seed = np.random.randint(1, 10000)
         print(f"\n\nRunning experiment with random seed: {random_seed}")
-        test_acc, test_prec, test_rec, test_f1 = main(random_seed=random_seed, dataset="glass0")     
+        test_acc, test_prec, test_rec, test_f1 = main(random_seed=random_seed, dataset="vehicle1")     
         tot_f1 += test_f1
         f1_scores.append(test_f1)
     avg_f1 = tot_f1 / runs

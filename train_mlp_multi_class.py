@@ -164,7 +164,7 @@ def make_imbalanced_dataset(X, y, high_classes, medium_classes, low_classes,
 class MLP(nn.Module):
     """Multi-Layer Perceptron for binary classification."""
     
-    def __init__(self, input_dim, hidden_dims=[5, 10, 5], num_classes=5):
+    def __init__(self, input_dim, hidden_dims=[128, 256, 128], num_classes=5):
         super().__init__()
         
         layers = []
@@ -244,12 +244,14 @@ def evaluate(model, dataloader, criterion, device):
     return avg_loss, accuracy, precision, recall, f1, all_preds, all_labels
 
 
+
+
 def main(random_seed=42, dataset=None):
 
 
         # Configuration
         data_path = f"kaggle_data/{dataset}.csv"
-        hidden_dims = [5, 10, 5]  # Hidden layer shape 5x10x5
+        hidden_dims = [128, 256, 128]  # Increased capacity: 128x256x128
         learning_rate = 0.001  # Adam learning rate
         batch_size = 32
         num_epochs = 200  # 2000 for KEEL data, 800 for synthetic data
@@ -284,8 +286,11 @@ def main(random_seed=42, dataset=None):
         # - Medium classes: ~17.5% each (so ~35% total, within 30-40% range)
         # - Majority (high) class: remaining ~58%
         # min_samples_per_class=15 ensures at least 10 samples in training after 70/30 split
-        X, y = make_imbalanced_dataset(
-            X, y, 
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=test_size, random_state=random_seed, stratify=y
+        )
+        X_train, y_train = make_imbalanced_dataset(
+            X_train, y_train, 
             high_classes=high_classes,
             medium_classes=medium_classes,
             low_classes=low_classes,
@@ -296,7 +301,7 @@ def main(random_seed=42, dataset=None):
         )
         
         print("New Imbalanced Dataset Information:")
-        print_imbalance_info(y)
+        print_imbalance_info(y_train)
         
         # Split data into train and test sets
         X_train, X_test, y_train, y_test = train_test_split(
