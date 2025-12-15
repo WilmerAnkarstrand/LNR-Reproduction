@@ -268,9 +268,6 @@ def main(random_seed=42, dataset=None):
         # Load and parse data
         print(f"\nLoading data from: {data_path}")
         X, y = parse_kaggle_dat(data_path)
-        print(f"First 5 samples of X:\n{X[0:5]}")
-        print(f"First 5 labels of y:\n{y[0:5]}")
-        # Print imbalance information
         print("Original Dataset Imbalance:")
         print_imbalance_info(y)
 
