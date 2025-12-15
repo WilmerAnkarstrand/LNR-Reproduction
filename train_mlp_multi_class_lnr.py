@@ -132,27 +132,46 @@ def lnr(model, x_train, y_train, device, t_flip):
     Train ONLY the last layer using LNR logic.
     Assumes model is already pre-trained and hidden layers are frozen.
     """
-        
-    # Compute mean and std of softmax outputs over entire training set
-    logits = model(torch.FloatTensor(x_train).to(device))
-    all_logits = torch.cat([logits], dim=0)
-    
-    Q = nn.Softmax(dim=1)(all_logits)
-    mean = Q.mean(dim=0)
-    std = Q.std(dim=0)
+    model.eval()
 
-    class_count = torch.tensor([(y_train == i).sum().item() for i in range(int(y_train.max()) + 1)], device=device, dtype=torch.float32)
+    # Convert numpy arrays to tensors efficiently
+    if not isinstance(x_train, torch.Tensor):
+        x_train = torch.tensor(x_train, device=device, dtype=torch.float32)
+    else:
+        x_train = x_train.to(device)
+    
+    if not isinstance(y_train, torch.Tensor):
+        y_train = torch.tensor(y_train, device=device, dtype=torch.long)
+    else:
+        y_train = y_train.to(device)
+
+    with torch.no_grad():
+        logits = model(x_train)
+        Q = nn.Softmax(dim=1)(logits)
+        mean = Q.mean(dim=0)
+        std = Q.std(dim=0)
+
+    # Count samples per class
+    num_classes = int(y_train.max()) + 1
+    class_count = torch.tensor([(y_train == i).sum().item() for i in range(num_classes)], device=device, dtype=torch.float32)
+
     # θC ← 1 − minMax(NC) where NC counts the samples of each class
     theta_c = 1 - (class_count - class_count.min()) / (class_count.max() - class_count.min())
 
-    Z_score_x = (Q - mean) / std
+    # Z_score_x
+    Z_score_x = (Q - mean) / (std + 1e-8)
     
     # Fix broadcasting: [1, C] - [B, 1] -> [B, C]
     flip_strength = torch.clamp(theta_c.unsqueeze(0) - theta_c[y_train].unsqueeze(1), min=0)
-    
+
+    #Class wise flip strength: θc=y
     class_fliprate = torch.clamp(torch.tanh(Z_score_x - t_flip), min=0) * flip_strength
     bernoulli_samples = torch.bernoulli(class_fliprate)
+
+    # Create a copy for relabeling
+    y_train_flipped = y_train.clone()
     total_flips = 0
+
     # For each sample, check if any class got a 1 (flip should happen)
     for i in range(len(y_train)):
         if bernoulli_samples[i].sum() > 0:  # U contains 1
@@ -165,9 +184,10 @@ def lnr(model, x_train, y_train, device, t_flip):
             new_class = flip_candidates[max_idx]
             
             # Relabel
-            y_train[i] = new_class
+            y_train_flipped[i] = new_class
             total_flips += 1
-    return y_train
+    print(f"LNR: Total labels flipped: {total_flips} out of {len(y_train)} samples. {100*total_flips/len(y_train):.2f}%")
+    return y_train_flipped
 
 
 def evaluate(model, dataloader, criterion, device):
