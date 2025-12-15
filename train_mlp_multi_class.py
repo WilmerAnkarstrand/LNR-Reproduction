@@ -300,12 +300,6 @@ def main(random_seed=42, dataset=None):
         print("New Imbalanced Dataset Information:")
         print_imbalance_info(y_train)
         
-        # Split data into train and test sets
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=test_size, random_state=random_seed, stratify=y
-        )
-        print(f"\nTrain set: {len(X_train)} samples")
-        print(f"Test set: {len(X_test)} samples")
         
         # Standardize features
         scaler = StandardScaler()
