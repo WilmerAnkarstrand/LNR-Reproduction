@@ -8,6 +8,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, classification_report
 import os
 import copy
+import matplotlib.pyplot as plt
+
 
 def parse_kaggle_dat(filepath):
     """Parse kaggle .csv file and return features and labels.
@@ -231,13 +233,16 @@ def lnr(model, x_train, y_train, device, t_flip):
     for i in range(len(y_train)):
         if bernoulli_samples[i].sum() > 0:  # U contains 1
             # Find indices where bernoulli == 1
-            flip_candidates = (bernoulli_samples[i] == 1).nonzero(as_tuple=True)[0]
+            flip_candidates = (bernoulli_samples[i] == 1).nonzero(as_tuple=True)[0] 
             
             # Among candidates, pick the one with max flip rate
-            # y^t ← C[indexOf(max(F_x[U == 1]))]
+            # y^t ← C[indexOf(max(F_x[U == 1]))]        
             max_idx = class_fliprate[i, flip_candidates].argmax()
             new_class = flip_candidates[max_idx]
             
+            #I want to see which samples are being flipped from which class to which class in a plot
+            #print(f"LNR: Sample {i} flipped from class {y_train[i].item()} to class {new_class.item()}")
+
             # Relabel
             y_train_flipped[i] = new_class
             total_flips += 1
@@ -292,15 +297,17 @@ def evaluate(model, dataloader, criterion, device):
     return avg_loss, accuracy, precision, recall, f1, all_preds, all_labels
 
 
-def main(random_seed=42, dataset=None):
+def main(random_seed=42, dataset=None, model_path = "keel/mlp/best_mlp_chronic_disease_dataset.pth", data_seed=None):
     # Config
     data_path = dataset
-    model_path = "keel/mlp/best_mlp_chronic_disease_dataset.pth"
+    
+    if data_seed is None:
+        data_seed = random_seed
     
     # LNR Config
     # old t_flip
     #t_flip = 0.5
-    lnr_epochs = 50  # Number of epochs to fine-tune last layer with LNR
+    lnr_epochs = 200  # Number of epochs to fine-tune last layer with LNR
     learning_rate = 0.001
     
     torch.manual_seed(random_seed)
@@ -322,9 +329,9 @@ def main(random_seed=42, dataset=None):
     # Current: 0:1322, 1:752, 2:521, 3:569, 4:334
     # We keep class 0 as high, 1 and 3 as medium, 2 and 4 as low
     high_classes = [0]
-    medium_classes = [1, 3]
-    low_classes = [2, 4]
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, stratify=y, random_state=random_seed)
+    medium_classes = [2, 4]
+    low_classes = [1, 3]
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, stratify=y, random_state=data_seed)
     # Target percentages for the imbalanced dataset:
     # - Low classes: ~3.5% each, so ~7% total for both low classes
     # - Medium classes: ~17.5% each (so ~35% total, within 30-40% range)
@@ -338,7 +345,7 @@ def main(random_seed=42, dataset=None):
         medium_target_pct=0.175,  # Each medium class ~17.5% (total ~35%)
         low_target_pct=0.035,     # Each low class ~3.5% (total ~7%)
         min_samples_per_class=15,  # Ensures ~10+ in training set after split
-        random_seed=random_seed
+        random_seed=data_seed
     )
     
     print("New Imbalanced Dataset Information:")
@@ -367,7 +374,7 @@ def main(random_seed=42, dataset=None):
     y_train = lnr(base_model,
         X_train,y_train,
         device,
-        t_flip=2.0
+        t_flip=1
     )
 
     print("LNR Dataset Information:")
@@ -403,9 +410,20 @@ def main(random_seed=42, dataset=None):
     # 6. Setup Optimizer (only for trainable parameters)
     optimizer = torch.optim.Adam(
         filter(lambda p: p.requires_grad, base_model.parameters()),
-        lr=learning_rate
+        lr=learning_rate, weight_decay=1e-4
     )
-    criterion = nn.CrossEntropyLoss()
+
+    # Calculate class weights to handle imbalance
+    # Cast to int because labels are loaded as floats
+    y_train_int = y_train.cpu().numpy().astype(int)
+    class_counts = np.bincount(y_train_int)
+    # Standard formula for balanced weights: n_samples / (n_classes * n_samples_j)
+    num_classes_present = len(np.unique(y_train_int))
+    total_samples = len(y_train_int)
+    class_weights = total_samples / (num_classes_present * np.maximum(class_counts, 1))
+    
+    class_weights_tensor = torch.FloatTensor(class_weights).to(device)
+    criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)
 
     #Original result
     org_loss, org_acc, _, _, _, org_preds, org_labels = evaluate(base_model, test_loader, criterion, device)
@@ -449,7 +467,7 @@ def main(random_seed=42, dataset=None):
     
     # 8. Final Evaluation
     print("\nFinal Evaluation on Test Set (Original Labels):")
-    final_loss, final_acc, _, _, _, preds, labels = evaluate(base_model, test_loader, criterion, device)
+    final_loss, final_acc, final_prec, final_rec, final_f1, preds, labels = evaluate(base_model, test_loader, criterion, device)
     print(f"Test Accuracy: {final_acc*100:.2f}%")
 
     cm = confusion_matrix(labels, preds)
@@ -459,9 +477,73 @@ def main(random_seed=42, dataset=None):
     print("\nClassification Report:")
     print(classification_report(labels, preds, zero_division=0))
     
-    return final_acc
+    per_class_prec = precision_score(labels, preds, average=None, zero_division=0)
+    per_class_f1 = f1_score(labels, preds, average=None, zero_division=0)
+
+    return final_acc, final_prec, final_rec, final_f1, per_class_prec, per_class_f1
     
 
 if __name__ == "__main__":
     # Ensure you run the original script first to generate 'best_mlp_glass0.pth'
-    main(dataset="kaggle_data/chronic_disease_dataset.csv")
+    fixed_data_seed = 5871
+    runs = 5
+    
+    tot_f1 = 0.0
+    f1_scores = []
+    tot_prec = 0.0
+    prec_scores = []
+    
+    all_per_class_prec = []
+    all_per_class_f1 = []
+
+    for i in range(runs):
+        # Generate a new random seed for the LNR process and training
+        current_seed = np.random.randint(1, 10000)
+        print(f"\n\nRunning experiment {i+1}/{runs} with data_seed: {fixed_data_seed}, run_seed: {current_seed}")
+        
+        test_acc, test_prec, test_rec, test_f1, per_class_prec, per_class_f1 = main(
+            random_seed=current_seed, 
+            dataset="kaggle_data/chronic_disease_dataset.csv", 
+            model_path=f"keel/mlp_final/final_mlp_chronic_disease_dataset_{fixed_data_seed}_{0.2546}.pth",
+            data_seed=fixed_data_seed
+        )
+        
+        tot_f1 += test_f1
+        f1_scores.append(test_f1)
+        tot_prec += test_prec
+        prec_scores.append(test_prec)
+        
+        all_per_class_prec.append(per_class_prec)
+        all_per_class_f1.append(per_class_f1)
+
+    avg_prec = tot_prec / runs
+    std_prec = (sum((score - avg_prec) ** 2 for score in prec_scores) / runs) ** 0.5
+    print(f"\n\nAverage Precision over {runs} runs: {avg_prec:.4f}")
+    print(f"Standard Deviation of Precision: {std_prec:.4f}")
+    avg_f1 = tot_f1 / runs
+    std_f1 = (sum((score - avg_f1) ** 2 for score in f1_scores) / runs) ** 0.5
+    print(f"\n\nAverage F1 over {runs} runs: {avg_f1:.4f}")
+    print(f"Standard Deviation of F1: {std_f1:.4f}")
+
+    # Calculate per-class stats
+    all_per_class_prec = np.array(all_per_class_prec)
+    all_per_class_f1 = np.array(all_per_class_f1)
+    
+    mean_per_class_prec = np.mean(all_per_class_prec, axis=0)
+    std_per_class_prec = np.std(all_per_class_prec, axis=0)
+    
+    mean_per_class_f1 = np.mean(all_per_class_f1, axis=0)
+    std_per_class_f1 = np.std(all_per_class_f1, axis=0)
+    
+    print("\n" + "="*50)
+    print("Per-Class Statistics over {} runs".format(runs))
+    print("="*50)
+    num_classes = len(mean_per_class_prec)
+    for cls in range(num_classes):
+        print(f"Class {cls}:")
+        print(f"  Precision: {mean_per_class_prec[cls]:.4f} ± {std_per_class_prec[cls]:.4f}")
+        print(f"  F1-Score:  {mean_per_class_f1[cls]:.4f} ± {std_per_class_f1[cls]:.4f}")
+    
+      
+
+     

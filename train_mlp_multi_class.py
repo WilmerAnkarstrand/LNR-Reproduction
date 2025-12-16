@@ -248,6 +248,9 @@ def evaluate(model, dataloader, criterion, device):
 
 def main(random_seed=42, dataset=None):
 
+        # Create directories if they don't exist
+        os.makedirs('keel/mlp', exist_ok=True)
+        os.makedirs('keel/mlp_final', exist_ok=True)
 
         # Configuration
         data_path = f"kaggle_data/{dataset}.csv"
@@ -275,8 +278,8 @@ def main(random_seed=42, dataset=None):
         # Current: 0:1322, 1:752, 2:521, 3:569, 4:334
         # We keep class 0 as high, 1 and 3 as medium, 2 and 4 as low
         high_classes = [0]
-        medium_classes = [1, 3]
-        low_classes = [2, 4]
+        medium_classes = [2, 4]
+        low_classes = [1, 3]
         
         # Target percentages for the imbalanced dataset:
         # - Low classes: ~3.5% each, so ~7% total for both low classes
@@ -356,6 +359,7 @@ def main(random_seed=42, dataset=None):
         
         best_f1 = 0.0
         best_epoch = 0
+        best_seed = random_seed
         
         for epoch in range(num_epochs):
             train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device)
@@ -368,8 +372,9 @@ def main(random_seed=42, dataset=None):
             if val_f1 > best_f1:
                 best_f1 = val_f1
                 best_epoch = epoch + 1
+                best_seed = random_seed
                 # Save best model
-                torch.save(model.state_dict(), f'keel/mlp/best_mlp_{dataset}.pth')
+                torch.save(model.state_dict(), f'keel/mlp/best_mlp_{dataset}_{random_seed}.pth')
             
             if (epoch + 1) % 10 == 0 or epoch == 0:
                 print(f"Epoch [{epoch+1:3d}/{num_epochs}] | "
@@ -380,8 +385,10 @@ def main(random_seed=42, dataset=None):
         print("\n" + "="*60)
         print(f"Training Complete! Best F1: {best_f1:.4f} at epoch {best_epoch}")
         print("="*60)
+        print("best model path:", f'keel/mlp/best_mlp_{dataset}_{best_seed}.pth')
+        model.load_state_dict(torch.load(f'keel/mlp/best_mlp_{dataset}_{best_seed}.pth'))
+        torch.save(model.state_dict(), f'keel/mlp_final/final_mlp_{dataset}_{best_seed}_{best_f1:.4f}.pth')
         
-        model.load_state_dict(torch.load(f'keel/mlp/best_mlp_{dataset}.pth'))
         test_loss, test_acc, test_prec, test_rec, test_f1, preds, labels = evaluate(
             model, test_loader, criterion, device
         )
@@ -399,21 +406,59 @@ def main(random_seed=42, dataset=None):
 
         print("\nClassification Report:")
         print(classification_report(labels, preds, zero_division=0))
+
+        per_class_prec = precision_score(labels, preds, average=None, zero_division=0)
+        per_class_f1 = f1_score(labels, preds, average=None, zero_division=0)
     
-        return test_acc, test_prec, test_rec, test_f1
+        return test_acc, test_prec, test_rec, test_f1, per_class_prec, per_class_f1
 
 
 if __name__ == "__main__":
-    runs = 1
+    runs = 5
     tot_f1 = 0.0
     f1_scores = []
+    tot_prec = 0.0
+    prec_scores = []
+    
+    all_per_class_prec = []
+    all_per_class_f1 = []
+
     for i in range(runs):
         random_seed = np.random.randint(1, 10000)
         print(f"\n\nRunning experiment with random seed: {random_seed}")
-        test_acc, test_prec, test_rec, test_f1 = main(random_seed=random_seed, dataset="chronic_disease_dataset")     
+        test_acc, test_prec, test_rec, test_f1, per_class_prec, per_class_f1 = main(random_seed=random_seed, dataset="chronic_disease_dataset")     
         tot_f1 += test_f1
         f1_scores.append(test_f1)
+        tot_prec += test_prec
+        prec_scores.append(test_prec)
+        
+        all_per_class_prec.append(per_class_prec)
+        all_per_class_f1.append(per_class_f1)
+
+    avg_prec = tot_prec / runs
+    std_prec = (sum((score - avg_prec) ** 2 for score in prec_scores) / runs) ** 0.5
+    print(f"\n\nAverage Precision over {runs} runs: {avg_prec:.4f}")
+    print(f"Standard Deviation of Precision: {std_prec:.4f}")
     avg_f1 = tot_f1 / runs
     std_f1 = (sum((score - avg_f1) ** 2 for score in f1_scores) / runs) ** 0.5
-    print(f"\n\nAverage F1 over 10 runs: {avg_f1:.4f}")
+    print(f"\n\nAverage F1 over {runs} runs: {avg_f1:.4f}")
     print(f"Standard Deviation of F1: {std_f1:.4f}")
+
+    # Calculate per-class stats
+    all_per_class_prec = np.array(all_per_class_prec)
+    all_per_class_f1 = np.array(all_per_class_f1)
+    
+    mean_per_class_prec = np.mean(all_per_class_prec, axis=0)
+    std_per_class_prec = np.std(all_per_class_prec, axis=0)
+    
+    mean_per_class_f1 = np.mean(all_per_class_f1, axis=0)
+    std_per_class_f1 = np.std(all_per_class_f1, axis=0)
+    
+    print("\n" + "="*50)
+    print("Per-Class Statistics over {} runs".format(runs))
+    print("="*50)
+    num_classes = len(mean_per_class_prec)
+    for cls in range(num_classes):
+        print(f"Class {cls}:")
+        print(f"  Precision: {mean_per_class_prec[cls]:.4f} ± {std_per_class_prec[cls]:.4f}")
+        print(f"  F1-Score:  {mean_per_class_f1[cls]:.4f} ± {std_per_class_f1[cls]:.4f}")

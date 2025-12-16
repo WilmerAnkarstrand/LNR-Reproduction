@@ -10,7 +10,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, roc_auc_score
 import os
 import sys
 
@@ -131,6 +131,7 @@ def evaluate(model, dataloader, criterion, device):
     total_loss = 0.0
     all_preds = []
     all_labels = []
+    all_probs = []
     
     with torch.no_grad():
         for batch_x, batch_y in dataloader:
@@ -142,9 +143,11 @@ def evaluate(model, dataloader, criterion, device):
             loss = criterion(outputs, batch_y)
             
             total_loss += loss.item() * batch_x.size(0)
+            probs = torch.sigmoid(outputs)
             preds = (outputs > 0.5).float()
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(batch_y.cpu().numpy())
+            all_probs.extend(probs.cpu().numpy())
     
     avg_loss = total_loss / len(dataloader.dataset)
     accuracy = accuracy_score(all_labels, all_preds)
@@ -152,11 +155,30 @@ def evaluate(model, dataloader, criterion, device):
     recall = recall_score(all_labels, all_preds, zero_division=0)
     f1 = f1_score(all_labels, all_preds, zero_division=0)
     
-    return avg_loss, accuracy, precision, recall, f1, all_preds, all_labels
+    # Calculate AUC
+    try:
+        auc = roc_auc_score(all_labels, all_probs)
+    except ValueError:
+        auc = 0.0
+
+    # Calculate G-mean
+    cm = confusion_matrix(all_labels, all_preds)
+    if cm.shape == (2, 2):
+        tn, fp, fn, tp = cm.ravel()
+        tpr = tp / (tp + fn) if (tp + fn) > 0 else 0
+        tnr = tn / (tn + fp) if (tn + fp) > 0 else 0
+        gmean = np.sqrt(tpr * tnr)
+    else:
+        gmean = 0.0
+
+    return avg_loss, accuracy, precision, recall, f1, auc, gmean, all_preds, all_labels
 
 
 def main(random_seed=42, dataset=None):
 
+        # Create directories if they don't exist
+        os.makedirs('keel/mlp', exist_ok=True)
+        os.makedirs('keel/mlp_final', exist_ok=True)
 
         # Configuration
         data_path = f"Keel_data_sets/{dataset}.dat"
@@ -235,10 +257,11 @@ def main(random_seed=42, dataset=None):
         
         best_f1 = 0.0
         best_epoch = 0
+        best_seed = random_seed
         
         for epoch in range(num_epochs):
             train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device)
-            val_loss, val_acc, val_prec, val_rec, val_f1, _, _ = evaluate(
+            val_loss, val_acc, val_prec, val_rec, val_f1, val_auc, val_gmean, _, _ = evaluate(
                 model, test_loader, criterion, device
             )
             
@@ -247,8 +270,9 @@ def main(random_seed=42, dataset=None):
             if val_f1 > best_f1:
                 best_f1 = val_f1
                 best_epoch = epoch + 1
+                best_seed = random_seed
                 # Save best model
-                torch.save(model.state_dict(), f'keel/mlp/best_mlp_{dataset}.pth')
+                torch.save(model.state_dict(), f'keel/mlp/best_mlp_{dataset}_{random_seed}.pth')
             
             if (epoch + 1) % 10 == 0 or epoch == 0:
                 print(f"Epoch [{epoch+1:3d}/{num_epochs}] | "
@@ -259,9 +283,12 @@ def main(random_seed=42, dataset=None):
         print("\n" + "="*60)
         print(f"Training Complete! Best F1: {best_f1:.4f} at epoch {best_epoch}")
         print("="*60)
+        print("best model path:", f'keel/mlp/best_mlp_{dataset}_{best_seed}.pth')
         
-        model.load_state_dict(torch.load(f'keel/mlp/best_mlp_{dataset}.pth'))
-        test_loss, test_acc, test_prec, test_rec, test_f1, preds, labels = evaluate(
+        model.load_state_dict(torch.load(f'keel/mlp/best_mlp_{dataset}_{best_seed}.pth'))
+        torch.save(model.state_dict(), f'keel/mlp_final/final_mlp_{dataset}_{best_seed}_{best_f1:.4f}.pth')
+        
+        test_loss, test_acc, test_prec, test_rec, test_f1, test_auc, test_gmean, preds, labels = evaluate(
             model, test_loader, criterion, device
         )
         
@@ -270,6 +297,8 @@ def main(random_seed=42, dataset=None):
         print(f"  Precision: {test_prec:.4f}")
         print(f"  Recall:    {test_rec:.4f}")
         print(f"  F1-Score:  {test_f1:.4f}")
+        print(f"  AUC:       {test_auc:.4f}")
+        print(f"  G-Mean:    {test_gmean:.4f}")
         
         # Confusion Matrix
         cm = confusion_matrix(labels, preds)
@@ -277,20 +306,58 @@ def main(random_seed=42, dataset=None):
         print(f"  TN={cm[0,0]:3d}  FP={cm[0,1]:3d}")
         print(f"  FN={cm[1,0]:3d}  TP={cm[1,1]:3d}")
     
-        return test_acc, test_prec, test_rec, test_f1
+        return test_acc, test_prec, test_rec, test_f1, test_auc, test_gmean
 
 
 if __name__ == "__main__":
     runs = 10
     tot_f1 = 0.0
     f1_scores = []
+    tot_acc = 0.0
+    acc_scores = []
+    tot_prec = 0.0
+    prec_scores = []
+    tot_auc = 0.0
+    auc_scores = []
+    tot_gmean = 0.0
+    gmean_scores = []
+
     for i in range(runs):
         random_seed = np.random.randint(1, 10000)
         print(f"\n\nRunning experiment with random seed: {random_seed}")
-        test_acc, test_prec, test_rec, test_f1 = main(random_seed=random_seed, dataset="vehicle1")     
+        test_acc, test_prec, test_rec, test_f1, test_auc, test_gmean = main(random_seed=random_seed, dataset="glass0")     
         tot_f1 += test_f1
         f1_scores.append(test_f1)
+        tot_acc += test_acc
+        acc_scores.append(test_acc)
+        tot_prec += test_prec
+        prec_scores.append(test_prec)
+        tot_auc += test_auc
+        auc_scores.append(test_auc)
+        tot_gmean += test_gmean
+        gmean_scores.append(test_gmean)
+
+    avg_acc = tot_acc / runs
+    std_acc = (sum((score - avg_acc) ** 2 for score in acc_scores) / runs) ** 0.5
+    print(f"\n\nAverage Accuracy over {runs} runs: {avg_acc:.4f}")
+    print(f"Standard Deviation of Accuracy: {std_acc:.4f}")
+
+    avg_prec = tot_prec / runs
+    std_prec = (sum((score - avg_prec) ** 2 for score in prec_scores) / runs) ** 0.5
+    print(f"Average Precision over {runs} runs: {avg_prec:.4f}")
+    print(f"Standard Deviation of Precision: {std_prec:.4f}")
+
     avg_f1 = tot_f1 / runs
     std_f1 = (sum((score - avg_f1) ** 2 for score in f1_scores) / runs) ** 0.5
-    print(f"\n\nAverage F1 over 10 runs: {avg_f1:.4f}")
+    print(f"Average F1 over {runs} runs: {avg_f1:.4f}")
     print(f"Standard Deviation of F1: {std_f1:.4f}")
+
+    avg_auc = tot_auc / runs
+    std_auc = (sum((score - avg_auc) ** 2 for score in auc_scores) / runs) ** 0.5
+    print(f"Average AUC over {runs} runs: {avg_auc:.4f}")
+    print(f"Standard Deviation of AUC: {std_auc:.4f}")
+
+    avg_gmean = tot_gmean / runs
+    std_gmean = (sum((score - avg_gmean) ** 2 for score in gmean_scores) / runs) ** 0.5
+    print(f"Average G-Mean over {runs} runs: {avg_gmean:.4f}")
+    print(f"Standard Deviation of G-Mean: {std_gmean:.4f}")
