@@ -294,7 +294,14 @@ def evaluate(model, dataloader, criterion, device):
     recall = recall_score(all_labels, all_preds, average='weighted', zero_division=0)
     f1 = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
     
-    return avg_loss, accuracy, precision, recall, f1, all_preds, all_labels
+    # Per-class recall
+    per_class_recall = recall_score(all_labels, all_preds, labels=[0,1,2,3,4], average=None, zero_division=0)
+    # Head / Medium / Tail
+    head_acc = per_class_recall[[0]].mean()           # head class 0
+    med_acc  = per_class_recall[[2, 4]].mean()       # medium classes 2 & 4
+    tail_acc = per_class_recall[[1, 3]].mean()       # tail classes 1 & 3
+    
+    return avg_loss, accuracy, precision, recall, f1, all_preds, all_labels, head_acc, med_acc, tail_acc
 
 
 def main(random_seed=42, dataset=None, model_path = "keel/mlp/best_mlp_chronic_disease_dataset.pth", data_seed=None):
@@ -307,11 +314,11 @@ def main(random_seed=42, dataset=None, model_path = "keel/mlp/best_mlp_chronic_d
     # LNR Config
     # old t_flip
     #t_flip = 0.5
-    lnr_epochs = 200  # Number of epochs to fine-tune last layer with LNR
+    lnr_epochs = 500  # Number of epochs to fine-tune last layer with LNR
     learning_rate = 0.001
     
-    torch.manual_seed(random_seed)
-    np.random.seed(random_seed)
+    #torch.manual_seed(random_seed)
+    #np.random.seed(random_seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
@@ -374,11 +381,11 @@ def main(random_seed=42, dataset=None, model_path = "keel/mlp/best_mlp_chronic_d
     y_train = lnr(base_model,
         X_train,y_train,
         device,
-        t_flip=1
+        t_flip=2.0
     )
 
-    print("LNR Dataset Information:")
-    print_imbalance_info(y_train.cpu().numpy())
+    #print("LNR Dataset Information:")
+    #print_imbalance_info(y_train.cpu().numpy())
     
     # 4. Freeze Feature Layers (freeze all except the final classifier layer)
     # Freeze all parameters first
@@ -395,6 +402,7 @@ def main(random_seed=42, dataset=None, model_path = "keel/mlp/best_mlp_chronic_d
             print(f"  {name}: {param.shape}")
 
     # 5. Prepare Data Loaders with Flipped Labels
+    #y_train = torch.tensor(y_train, device=device, dtype=torch.long)
     train_dataset = TensorDataset(
         torch.tensor(X_train, dtype=torch.float32),
         y_train  # Already a tensor from lnr()
@@ -423,11 +431,18 @@ def main(random_seed=42, dataset=None, model_path = "keel/mlp/best_mlp_chronic_d
     class_weights = total_samples / (num_classes_present * np.maximum(class_counts, 1))
     
     class_weights_tensor = torch.FloatTensor(class_weights).to(device)
+    print(f"\nClass Weights: {class_weights}")
     criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)
 
+    # Learning rate scheduler
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=10, verbose=False
+    )
+
     #Original result
-    org_loss, org_acc, _, _, _, org_preds, org_labels = evaluate(base_model, test_loader, criterion, device)
+    org_loss, org_acc, _, _, _, org_preds, org_labels, head_acc, med_acc, tail_acc  = evaluate(base_model, test_loader, criterion, device)
     print(f"Original Test Accuracy (before LNR training): {org_acc*100:.2f}%")
+    print(f"Head Class Accuracy: {head_acc*100:.2f}%, Medium Classes Accuracy: {med_acc*100:.2f}%, Tail Classes Accuracy: {tail_acc*100:.2f}%")
 
     print("\nClassification Report:")
     print(classification_report(org_labels, org_preds, zero_division=0))
@@ -459,7 +474,8 @@ def main(random_seed=42, dataset=None, model_path = "keel/mlp/best_mlp_chronic_d
         
         # Evaluate on test set (with original labels)
         if (epoch + 1) % 10 == 0 or epoch == 0:
-            test_loss, test_acc, _, _, _, _, _ = evaluate(base_model, test_loader, criterion, device)
+            test_loss, test_acc, _, _, _, _, _,_,_,_ = evaluate(base_model, test_loader, criterion, device)
+            scheduler.step(test_loss)
             print(f"Epoch {epoch+1}/{lnr_epochs} - "
                   f"Train Loss: {train_loss/len(train_loader):.4f}, "
                   f"Train Acc: {train_acc:.2f}%, "
@@ -467,8 +483,9 @@ def main(random_seed=42, dataset=None, model_path = "keel/mlp/best_mlp_chronic_d
     
     # 8. Final Evaluation
     print("\nFinal Evaluation on Test Set (Original Labels):")
-    final_loss, final_acc, final_prec, final_rec, final_f1, preds, labels = evaluate(base_model, test_loader, criterion, device)
+    final_loss, final_acc, final_prec, final_rec, final_f1, preds, labels, head_acc, med_acc, tail_acc = evaluate(base_model, test_loader, criterion, device)
     print(f"Test Accuracy: {final_acc*100:.2f}%")
+    print(f"Head Class Accuracy: {head_acc*100:.2f}%, Medium Classes Accuracy: {med_acc*100:.2f}%, Tail Classes Accuracy: {tail_acc*100:.2f}%")
 
     cm = confusion_matrix(labels, preds)
     print(f"\nConfusion Matrix:")
@@ -480,7 +497,7 @@ def main(random_seed=42, dataset=None, model_path = "keel/mlp/best_mlp_chronic_d
     per_class_prec = precision_score(labels, preds, average=None, zero_division=0)
     per_class_f1 = f1_score(labels, preds, average=None, zero_division=0)
 
-    return final_acc, final_prec, final_rec, final_f1, per_class_prec, per_class_f1
+    return final_acc, final_prec, final_rec, final_f1, per_class_prec, per_class_f1, head_acc, med_acc, tail_acc
     
 
 if __name__ == "__main__":
@@ -496,12 +513,17 @@ if __name__ == "__main__":
     all_per_class_prec = []
     all_per_class_f1 = []
 
+    overall_acc = []
+    all_head_acc = []
+    all_med_acc = []
+    all_tail_acc = []
+
     for i in range(runs):
         # Generate a new random seed for the LNR process and training
         current_seed = np.random.randint(1, 10000)
         print(f"\n\nRunning experiment {i+1}/{runs} with data_seed: {fixed_data_seed}, run_seed: {current_seed}")
         
-        test_acc, test_prec, test_rec, test_f1, per_class_prec, per_class_f1 = main(
+        test_acc, test_prec, test_rec, test_f1, per_class_prec, per_class_f1, test_head_acc, test_med_acc, test_tail_acc = main(
             random_seed=current_seed, 
             dataset="kaggle_data/chronic_disease_dataset.csv", 
             model_path=f"keel/mlp_final/final_mlp_chronic_disease_dataset_{fixed_data_seed}_{0.2546}.pth",
@@ -515,6 +537,11 @@ if __name__ == "__main__":
         
         all_per_class_prec.append(per_class_prec)
         all_per_class_f1.append(per_class_f1)
+
+        overall_acc.append(test_acc)
+        all_head_acc.append(test_head_acc)
+        all_med_acc.append(test_med_acc)
+        all_tail_acc.append(test_tail_acc)
 
     avg_prec = tot_prec / runs
     std_prec = (sum((score - avg_prec) ** 2 for score in prec_scores) / runs) ** 0.5
@@ -544,6 +571,21 @@ if __name__ == "__main__":
         print(f"  Precision: {mean_per_class_prec[cls]:.4f} ± {std_per_class_prec[cls]:.4f}")
         print(f"  F1-Score:  {mean_per_class_f1[cls]:.4f} ± {std_per_class_f1[cls]:.4f}")
     
-      
+    mean_overall_acc = np.mean(overall_acc)
+    std_overall_acc = np.std(overall_acc)   
+
+    mean_head_acc = np.mean(all_head_acc)
+    std_head_acc = np.std(all_head_acc)
+
+    mean_med_acc = np.mean(all_med_acc)
+    std_med_acc = np.std(all_med_acc)
+
+    mean_tail_acc = np.mean(all_tail_acc)
+    std_tail_acc = np.std(all_tail_acc)
+    print("\nOverall Group Accuracies:")
+    print(f"  Overall Accuracy:      {mean_overall_acc:.4f} ± {std_overall_acc:.4f}")
+    print(f"  Head Class Accuracy:   {mean_head_acc:.4f} ± {std_head_acc:.4f}")
+    print(f"  Medium Classes Accuracy: {mean_med_acc:.4f} ± {std_med_acc:.4f}")
+    print(f"  Tail Classes Accuracy:   {mean_tail_acc:.4f} ± {std_tail_acc:.4f}")
 
      

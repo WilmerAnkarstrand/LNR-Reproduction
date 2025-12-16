@@ -255,7 +255,7 @@ def main(random_seed=42, dataset=None):
         print("Starting Training")
         print("="*60)
         
-        best_f1 = 0.0
+        best_f1 = -1.0
         best_epoch = 0
         best_seed = random_seed
         
@@ -285,7 +285,7 @@ def main(random_seed=42, dataset=None):
         print("="*60)
         print("best model path:", f'keel/mlp/best_mlp_{dataset}_{best_seed}.pth')
         
-        model.load_state_dict(torch.load(f'keel/mlp/best_mlp_{dataset}_{best_seed}.pth'))
+        model.load_state_dict(torch.load(f'keel/mlp/best_mlp_{dataset}_{best_seed}.pth', weights_only=True))
         torch.save(model.state_dict(), f'keel/mlp_final/final_mlp_{dataset}_{best_seed}_{best_f1:.4f}.pth')
         
         test_loss, test_acc, test_prec, test_rec, test_f1, test_auc, test_gmean, preds, labels = evaluate(
@@ -325,7 +325,7 @@ if __name__ == "__main__":
     for i in range(runs):
         random_seed = np.random.randint(1, 10000)
         print(f"\n\nRunning experiment with random seed: {random_seed}")
-        test_acc, test_prec, test_rec, test_f1, test_auc, test_gmean = main(random_seed=random_seed, dataset="glass0")     
+        test_acc, test_prec, test_rec, test_f1, test_auc, test_gmean = main(random_seed=random_seed, dataset="yeast1")     
         tot_f1 += test_f1
         f1_scores.append(test_f1)
         tot_acc += test_acc

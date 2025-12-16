@@ -5,7 +5,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import train_test_split, StratifiedKFold  
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, roc_auc_score
 import os
 import copy
 
@@ -128,22 +128,43 @@ def evaluate(model, dataloader, criterion, device):
     total_loss = 0.0
     all_preds = []
     all_labels = []
+    all_probs = []
     with torch.no_grad():
         for batch_x, batch_y in dataloader:
             batch_x, batch_y = batch_x.to(device), batch_y.to(device)
             outputs = model(batch_x).squeeze(-1)
             loss = criterion(outputs, batch_y)
             total_loss += loss.item() * batch_x.size(0)
-            preds = (outputs > 0.5).float()
+            probs = torch.sigmoid(outputs)
+            preds = (probs > 0.5).float()
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(batch_y.cpu().numpy())
-    return total_loss/len(dataloader.dataset), accuracy_score(all_labels, all_preds), f1_score(all_labels, all_preds, zero_division=0)
+            all_probs.extend(probs.cpu().numpy())
+            
+    acc = accuracy_score(all_labels, all_preds)
+    f1 = f1_score(all_labels, all_preds, zero_division=0)
+    
+    try:
+        auc = roc_auc_score(all_labels, all_probs)
+    except ValueError:
+        auc = 0.0
+        
+    tn, fp, fn, tp = confusion_matrix(all_labels, all_preds).ravel()
+    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+    g_mean = np.sqrt(sensitivity * specificity)
+    
+    return total_loss/len(dataloader.dataset), acc, f1, auc, g_mean
 
-def main(random_seed=42, dataset=None):
+def main(random_seed=42, dataset=None, model_path=None, data_seed=None):
     # Config
     data_path = f"Keel_data_sets/{dataset}.dat"
-    model_path = f"keel/mlp/best_mlp_{dataset}.pth"
+    if model_path is None:
+        model_path = f"keel/mlp_final/best_mlp_{dataset}.pth"
     
+    if data_seed is None:
+        data_seed = random_seed
+
     # LNR Config
     # old t_flip
     #t_flip = 0.5
@@ -160,7 +181,7 @@ def main(random_seed=42, dataset=None):
         return 0,0,0,0
         
     X, y = parse_keel_dat(data_path)
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, stratify=y, random_state=random_seed)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, stratify=y, random_state=data_seed)
     
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X_train)
@@ -169,13 +190,14 @@ def main(random_seed=42, dataset=None):
     # 2. Prepare Base Model
     # We load the weights once here to pass them to CV and final training
     base_model = MLP(input_dim=X_train.shape[1])
+    print(f"Checking model path: {os.path.abspath(model_path)}")
     if os.path.exists(model_path):
         print(f"Loading pre-trained model from {model_path}...")
-        base_state = torch.load(model_path)
+        base_state = torch.load(model_path, weights_only=True)
         base_model.load_state_dict(base_state)
     else:
-        print("ERROR: Pre-trained model not found!")
-        return
+        print(f"ERROR: Pre-trained model not found at {model_path}!")
+        return 0, 0, 0, 0
     
     t_flip = select_best_t_flip(
     X_train, 
@@ -183,7 +205,8 @@ def main(random_seed=42, dataset=None):
     base_state, 
     input_dim=X_train.shape[1], 
     device=device,
-    lnr_epochs=15 # Can be lower than final training to save time
+    lnr_epochs=15, # Can be lower than final training to save time
+    random_state=random_seed
 )
      # ============================================================
     # STEP 4: FINAL TRAINING WITH SELECTED t_flip
@@ -237,11 +260,11 @@ def main(random_seed=42, dataset=None):
 
     print(f"\nStarting LNR Fine-tuning for {lnr_epochs} epochs...")
     
-    best_f1 = 0.0
+    best_f1 = -1.0
     
     for epoch in range(lnr_epochs):
         loss, acc = train_epoch_lnr(model, train_loader, criterion, optimizer, device, t_flip)
-        _, _, val_f1 = evaluate(model, test_loader, criterion, device)
+        _, _, val_f1, _, _ = evaluate(model, test_loader, criterion, device)
         
         if val_f1 > best_f1:
             best_f1 = val_f1
@@ -252,14 +275,19 @@ def main(random_seed=42, dataset=None):
             print(f"Epoch {epoch+1}: Loss {loss:.4f}, Flips: {total_flips}, Val F1: {val_f1:.4f}")
 
     # Final Eval
-    model.load_state_dict(torch.load(f'keel/mlp/best_mlp_lnr_{dataset}.pth'))
-    _, acc, f1 = evaluate(model, test_loader, criterion, device)
+    # Load the best LNR model saved during training
+    best_model_path = f'keel/mlp/best_mlp_lnr_{dataset}.pth'
+    if os.path.exists(best_model_path):
+        print(f"Loading best LNR model from {best_model_path}...")
+        model.load_state_dict(torch.load(best_model_path))
     
-    print(f"\nFinal Result with LNR - F1: {f1:.4f}, Acc: {acc:.4f}")
-    return acc, 0, 0, f1
+    _, acc, f1, auc, g_mean = evaluate(model, test_loader, criterion, device)
+    
+    print(f"\nFinal Result with LNR - F1: {f1:.4f}, Acc: {acc:.4f}, AUC: {auc:.4f}, G-Mean: {g_mean:.4f}")
+    return acc, f1, auc, g_mean
 
 
-def select_best_t_flip(X_train, y_train, base_model_state, input_dim, device, lnr_epochs=20):
+def select_best_t_flip(X_train, y_train, base_model_state, input_dim, device, lnr_epochs=20, random_state=42):
     """
     Performs K-Fold CV to find the best t_flip threshold.
     """
@@ -269,7 +297,7 @@ def select_best_t_flip(X_train, y_train, base_model_state, input_dim, device, ln
     best_avg_f1 = -1.0
     
     print(f"\n--- Starting Cross-Validation for t_flip selection ---")
-    skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=42) # 3 or 5 folds
+    skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=random_state) # 3 or 5 folds
     
     for t in candidates:
         fold_f1s = []
@@ -307,7 +335,7 @@ def select_best_t_flip(X_train, y_train, base_model_state, input_dim, device, ln
                 train_epoch_lnr(model, train_loader, criterion, optimizer, device, t)
             
             # Evaluate
-            _, _, f1 = evaluate(model, val_loader, criterion, device)
+            _, _, f1, _, _ = evaluate(model, val_loader, criterion, device)
             fold_f1s.append(f1)
             
         avg_f1 = np.mean(fold_f1s)
@@ -323,4 +351,65 @@ def select_best_t_flip(X_train, y_train, base_model_state, input_dim, device, ln
 
 if __name__ == "__main__":
     # Ensure you run the original script first to generate 'best_mlp_glass0.pth'
-    main(dataset="ecoli1")
+    fixed_data_seed = 6779
+    runs = 5
+    
+    tot_f1 = 0.0
+    f1_scores = []
+    tot_acc = 0.0
+    acc_scores = []
+    tot_auc = 0.0
+    auc_scores = []
+    tot_gmean = 0.0
+    gmean_scores = []
+
+    for i in range(runs):
+        # Generate a new random seed for the LNR process and training
+        current_seed = np.random.randint(1, 10000)
+        print(f"\n\nRunning experiment {i+1}/{runs} with data_seed: {fixed_data_seed}, run_seed: {current_seed}")
+        
+        # Assuming the model was saved with the data seed in the filename
+        # Adjust the model path format if your saved models have a different naming convention
+        # For example: f"keel/mlp/best_mlp_ecoli1_{fixed_data_seed}.pth"
+        # If you are using a generic model, you can pass None or the specific path
+        
+        # Check if seeded model exists, otherwise fall back to generic
+        dataset_name = "yeast1"
+        seeded_model_path = "keel/mlp_final/final_mlp_yeast1_6779_0.6471.pth"
+        
+
+        test_acc, test_f1, test_auc, test_gmean = main(
+            random_seed=current_seed, 
+            dataset=dataset_name,
+            model_path=seeded_model_path,
+            data_seed=fixed_data_seed
+        )
+        
+        tot_f1 += test_f1
+        f1_scores.append(test_f1)
+        tot_acc += test_acc
+        acc_scores.append(test_acc)
+        tot_auc += test_auc
+        auc_scores.append(test_auc)
+        tot_gmean += test_gmean
+        gmean_scores.append(test_gmean)
+
+    avg_f1 = tot_f1 / runs
+    std_f1 = (sum((score - avg_f1) ** 2 for score in f1_scores) / runs) ** 0.5
+    print(f"\n\nAverage F1 over {runs} runs: {avg_f1:.4f}")
+    print(f"Standard Deviation of F1: {std_f1:.4f}")
+    
+    avg_acc = tot_acc / runs
+    std_acc = (sum((score - avg_acc) ** 2 for score in acc_scores) / runs) ** 0.5
+    print(f"Average Accuracy over {runs} runs: {avg_acc:.4f}")
+    print(f"Standard Deviation of Accuracy: {std_acc:.4f}")
+
+    avg_auc = tot_auc / runs
+    std_auc = (sum((score - avg_auc) ** 2 for score in auc_scores) / runs) ** 0.5
+    print(f"Average AUC over {runs} runs: {avg_auc:.4f}")
+    print(f"Standard Deviation of AUC: {std_auc:.4f}")
+
+    avg_gmean = tot_gmean / runs
+    std_gmean = (sum((score - avg_gmean) ** 2 for score in gmean_scores) / runs) ** 0.5
+    print(f"Average G-Mean over {runs} runs: {avg_gmean:.4f}")
+    print(f"Standard Deviation of G-Mean: {std_gmean:.4f}")

@@ -240,8 +240,15 @@ def evaluate(model, dataloader, criterion, device):
     precision = precision_score(all_labels, all_preds, average='weighted', zero_division=0)
     recall = recall_score(all_labels, all_preds, average='weighted', zero_division=0)
     f1 = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
+
+    # Per-class recall
+    per_class_recall = recall_score(all_labels, all_preds, labels=[0,1,2,3,4], average=None, zero_division=0)
+    # Head / Medium / Tail
+    head_acc = per_class_recall[[0]].mean()           # head class 0
+    med_acc  = per_class_recall[[2, 4]].mean()       # medium classes 2 & 4
+    tail_acc = per_class_recall[[1, 3]].mean()       # tail classes 1 & 3
     
-    return avg_loss, accuracy, precision, recall, f1, all_preds, all_labels
+    return avg_loss, accuracy, precision, recall, f1, all_preds, all_labels, head_acc, med_acc, tail_acc
 
 
 
@@ -363,7 +370,7 @@ def main(random_seed=42, dataset=None):
         
         for epoch in range(num_epochs):
             train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device)
-            val_loss, val_acc, val_prec, val_rec, val_f1, _, _ = evaluate(
+            val_loss, val_acc, val_prec, val_rec, val_f1, _, _, head_acc, med_acc, tail_acc = evaluate(
                 model, test_loader, criterion, device
             )
             
@@ -389,7 +396,7 @@ def main(random_seed=42, dataset=None):
         model.load_state_dict(torch.load(f'keel/mlp/best_mlp_{dataset}_{best_seed}.pth'))
         torch.save(model.state_dict(), f'keel/mlp_final/final_mlp_{dataset}_{best_seed}_{best_f1:.4f}.pth')
         
-        test_loss, test_acc, test_prec, test_rec, test_f1, preds, labels = evaluate(
+        test_loss, test_acc, test_prec, test_rec, test_f1, preds, labels, head_acc, med_acc, tail_acc = evaluate(
             model, test_loader, criterion, device
         )
         
@@ -410,7 +417,7 @@ def main(random_seed=42, dataset=None):
         per_class_prec = precision_score(labels, preds, average=None, zero_division=0)
         per_class_f1 = f1_score(labels, preds, average=None, zero_division=0)
     
-        return test_acc, test_prec, test_rec, test_f1, per_class_prec, per_class_f1
+        return test_acc, test_prec, test_rec, test_f1, per_class_prec, per_class_f1, head_acc, med_acc, tail_acc
 
 
 if __name__ == "__main__":
@@ -423,10 +430,15 @@ if __name__ == "__main__":
     all_per_class_prec = []
     all_per_class_f1 = []
 
+    overall_acc = []
+    all_head_acc = []
+    all_med_acc = []
+    all_tail_acc = []
+
     for i in range(runs):
         random_seed = np.random.randint(1, 10000)
         print(f"\n\nRunning experiment with random seed: {random_seed}")
-        test_acc, test_prec, test_rec, test_f1, per_class_prec, per_class_f1 = main(random_seed=random_seed, dataset="chronic_disease_dataset")     
+        test_acc, test_prec, test_rec, test_f1, per_class_prec, per_class_f1, test_head_acc, test_med_acc, test_tail_acc = main(random_seed=random_seed, dataset="chronic_disease_dataset")     
         tot_f1 += test_f1
         f1_scores.append(test_f1)
         tot_prec += test_prec
@@ -434,6 +446,11 @@ if __name__ == "__main__":
         
         all_per_class_prec.append(per_class_prec)
         all_per_class_f1.append(per_class_f1)
+
+        overall_acc.append(test_acc)
+        all_head_acc.append(test_head_acc)
+        all_med_acc.append(test_med_acc)
+        all_tail_acc.append(test_tail_acc)
 
     avg_prec = tot_prec / runs
     std_prec = (sum((score - avg_prec) ** 2 for score in prec_scores) / runs) ** 0.5
@@ -462,3 +479,20 @@ if __name__ == "__main__":
         print(f"Class {cls}:")
         print(f"  Precision: {mean_per_class_prec[cls]:.4f} ± {std_per_class_prec[cls]:.4f}")
         print(f"  F1-Score:  {mean_per_class_f1[cls]:.4f} ± {std_per_class_f1[cls]:.4f}")
+
+    mean_overall_acc = np.mean(overall_acc)
+    std_overall_acc = np.std(overall_acc)   
+
+    mean_head_acc = np.mean(all_head_acc)
+    std_head_acc = np.std(all_head_acc)
+
+    mean_med_acc = np.mean(all_med_acc)
+    std_med_acc = np.std(all_med_acc)
+
+    mean_tail_acc = np.mean(all_tail_acc)
+    std_tail_acc = np.std(all_tail_acc)
+    print("\nOverall Group Accuracies:")
+    print(f"  Overall Accuracy:      {mean_overall_acc:.4f} ± {std_overall_acc:.4f}")
+    print(f"  Head Class Accuracy:   {mean_head_acc:.4f} ± {std_head_acc:.4f}")
+    print(f"  Medium Classes Accuracy: {mean_med_acc:.4f} ± {std_med_acc:.4f}")
+    print(f"  Tail Classes Accuracy:   {mean_tail_acc:.4f} ± {std_tail_acc:.4f}")
